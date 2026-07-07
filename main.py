@@ -71,7 +71,6 @@ class MinecraftUsernameChecker:
             # Handle rate limiting (429)
             if response.status_code == 429:
                 self.rate_limited = True
-                # Try to get reset time from headers
                 reset_time = response.headers.get('X-RateLimit-Reset')
                 if reset_time:
                     try:
@@ -82,7 +81,7 @@ class MinecraftUsernameChecker:
                     self.rate_limit_reset = time.time() + 30
                 return False, "Rate limited"
             
-            # Handle forbidden (403) - might be IP blocked or too many requests
+            # Handle forbidden (403)
             if response.status_code == 403:
                 self.consecutive_failures += 1
                 if self.consecutive_failures > 5:
@@ -90,32 +89,30 @@ class MinecraftUsernameChecker:
                     self.current_delay = min(self.current_delay * 2, 5.0)
                 return False, "Blocked (403)"
             
-            # Reset consecutive failures on success
             self.consecutive_failures = 0
             
-            # Check status codes
-            if response.status_code == 204:  # No Content = available
+            if response.status_code == 204:
                 return True, "Available"
-            elif response.status_code == 200:  # User exists = taken
+            elif response.status_code == 200:
                 return False, "Taken"
-            elif response.status_code == 404:  # Not found = available
+            elif response.status_code == 404:
                 return True, "Available"
             else:
                 return False, f"Status {response.status_code}"
                 
         except requests.exceptions.Timeout:
             return False, "Timeout"
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException:
             self.consecutive_failures += 1
             if self.consecutive_failures > 3:
                 self.current_delay = min(self.current_delay * 1.5, 5.0)
-            return False, f"Request error"
-        except Exception as e:
-            return False, f"Error"
+            return False, "Request error"
+        except Exception:
+            return False, "Error"
     
     def read_usernames_from_file(self, filename: str) -> List[str]:
         """
-        Read usernames from a text file with better memory handling.
+        Read usernames from a text file.
         """
         try:
             if not os.path.exists(filename):
@@ -138,14 +135,13 @@ class MinecraftUsernameChecker:
     
     def send_to_discord(self, usernames: List[str]) -> bool:
         """
-        Send available usernames to Discord with optimized chunks.
+        Send available usernames to Discord.
         """
         if not usernames:
             logger.info("No available usernames to send")
             return False
         
         try:
-            # Use larger chunks to send fewer messages
             chunks = [usernames[i:i+50] for i in range(0, len(usernames), 50)]
             
             for i, chunk in enumerate(chunks):
@@ -159,7 +155,6 @@ class MinecraftUsernameChecker:
                 
                 embed.set_timestamp(datetime.utcnow().isoformat())
                 
-                # Format usernames more efficiently
                 username_list = "\n".join([f"• `{name}`" for name in chunk])
                 if len(username_list) > 1000:
                     username_list = username_list[:997] + "..."
@@ -170,7 +165,6 @@ class MinecraftUsernameChecker:
                     inline=False
                 )
                 
-                # Only add stats to the first embed to save space
                 if i == 0:
                     elapsed_time = time.time() - self.start_time if self.start_time else 0
                     embed.add_embed_field(
@@ -191,7 +185,6 @@ class MinecraftUsernameChecker:
                     logger.error(f"Failed to send to Discord: {response.status_code}")
                     return False
                     
-                # Rate limit Discord webhooks
                 if i < len(chunks) - 1:
                     time.sleep(1)
                     
@@ -205,7 +198,6 @@ class MinecraftUsernameChecker:
         """
         Check all usernames with adaptive rate limiting.
         """
-        # Read usernames from file
         usernames = self.read_usernames_from_file(filename)
         
         if not usernames:
@@ -221,7 +213,6 @@ class MinecraftUsernameChecker:
         logger.info(f"Initial delay: {delay}s")
         logger.info("="*60)
         
-        # Process in smaller batches to avoid memory issues
         batch_size = 1000
         for batch_start in range(0, len(usernames), batch_size):
             batch_end = min(batch_start + batch_size, len(usernames))
@@ -232,7 +223,6 @@ class MinecraftUsernameChecker:
             for index, username in enumerate(batch, batch_start + 1):
                 self.checked_count += 1
                 
-                # Log progress less frequently
                 if index % 100 == 0 or index == 1:
                     progress_pct = (index / self.total_to_check) * 100
                     elapsed = time.time() - self.start_time
@@ -240,35 +230,27 @@ class MinecraftUsernameChecker:
                     logger.info(f"Progress: {index}/{self.total_to_check} ({progress_pct:.1f}%) - "
                                f"Found: {self.found_count} - Rate: {rate:.1f}/s")
                 
-                # Check username
                 is_available, status = self.check_username(username)
                 
                 if is_available:
                     self.available_usernames.append(username)
                     self.found_count += 1
                     logger.info(f"✅ AVAILABLE: {username}")
-                elif status in ["Taken", "Invalid username"]:
-                    # Don't log these, just count them
-                    pass
-                else:
+                elif status not in ["Taken", "Invalid username"]:
                     self.failed_count += 1
                     if self.failed_count % 10 == 0:
                         logger.warning(f"Error count: {self.failed_count}, current delay: {self.current_delay:.2f}s")
                 
-                # Adaptive delay
                 if self.current_delay > delay:
                     self.current_delay = max(delay, self.current_delay * 0.99)
                 
-                # Random jitter to avoid pattern detection
                 jitter = random.uniform(0, 0.1)
                 time.sleep(self.current_delay + jitter)
             
-            # Save progress after each batch
             if self.available_usernames:
                 with open('available_usernames_progress.txt', 'w') as f:
                     f.write('\n'.join(self.available_usernames))
         
-        # Final summary
         elapsed_time = time.time() - self.start_time
         logger.info("\n" + "="*60)
         logger.info("📊 CHECK COMPLETE!")
@@ -278,14 +260,12 @@ class MinecraftUsernameChecker:
         logger.info(f"⏱️ Time: {int(elapsed_time // 60)}m {int(elapsed_time % 60)}s")
         logger.info("="*60)
         
-        # Save final results
         if self.available_usernames:
             output_file = f"available_usernames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             with open(output_file, 'w') as f:
                 f.write('\n'.join(self.available_usernames))
             logger.info(f"Saved {len(self.available_usernames)} usernames to {output_file}")
             
-            # Send to Discord
             if self.webhook_url:
                 logger.info("Sending results to Discord...")
                 self.send_to_discord(self.available_usernames)
@@ -294,23 +274,13 @@ def main():
     """Main function with webhook URL directly in code."""
     
     # ============================================================
-    # YOUR DISCORD WEBHOOK URL - PUT YOUR URL HERE
+    # YOUR DISCORD WEBHOOK URL - PUT YOUR REGENERATED URL HERE
     # ============================================================
     WEBHOOK_URL = "https://discord.com/api/webhooks/1524005267589693550/06JPUmgxblCNxaja8rlBVONGDkEAfH-FSvZ6ShAklHizL0nmyMdOi-Zgc8FK5q22sSEO"
     
     # Configuration
-    WORDS_FILE = os.getenv('WORDS_FILE', 'words.txt')
-    REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2.0'))
-    MAX_USERS = int(os.getenv('MAX_USERS', '1000'))
-    
-    # Check if we should limit the number of users
-    if MAX_USERS > 0 and os.path.exists(WORDS_FILE):
-        with open(WORDS_FILE, 'r') as f:
-            lines = f.readlines()[:MAX_USERS]
-        with open('words_limited.txt', 'w') as f:
-            f.writelines(lines)
-        WORDS_FILE = 'words_limited.txt'
-        logger.info(f"Limited to first {MAX_USERS} usernames")
+    WORDS_FILE = "words.txt"  # Use your full words.txt file
+    REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2.0'))  # 2 second delay between requests
     
     # Create checker instance
     checker = MinecraftUsernameChecker(WEBHOOK_URL)
