@@ -51,8 +51,8 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            # FIXED: Use datetime.now(timezone.utc)
-            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
+            # FIXED: Pass datetime object directly, not string
+            embed.set_timestamp(datetime.now(timezone.utc))
             
             # Add info fields
             embed.add_embed_field(
@@ -99,8 +99,8 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            # FIXED: Use datetime.now(timezone.utc)
-            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
+            # FIXED: Pass datetime object directly, not string
+            embed.set_timestamp(datetime.now(timezone.utc))
             
             # Add stats
             elapsed_time = time.time() - self.start_time if self.start_time else 0
@@ -154,8 +154,8 @@ class MinecraftUsernameChecker:
                     color="ff0000"
                 )
             
-            # FIXED: Use datetime.now(timezone.utc)
-            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
+            # FIXED: Pass datetime object directly, not string
+            embed.set_timestamp(datetime.now(timezone.utc))
             
             embed.add_embed_field(
                 name="📊 Final Statistics",
@@ -298,8 +298,7 @@ class MinecraftUsernameChecker:
                     description="No usernames found in words.txt file!",
                     color="ff0000"
                 )
-                # FIXED: Use datetime.now(timezone.utc)
-                embed.set_timestamp(datetime.now(timezone.utc).isoformat())
+                embed.set_timestamp(datetime.now(timezone.utc))
                 webhook.add_embed(embed)
                 webhook.execute()
             except:
@@ -327,8 +326,7 @@ class MinecraftUsernameChecker:
                 description=f"Will check **{self.total_to_check}** usernames",
                 color="00ff00"
             )
-            # FIXED: Use datetime.now(timezone.utc)
-            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
+            embed.set_timestamp(datetime.now(timezone.utc))
             embed.add_embed_field(
                 name="📊 Info",
                 value=f"• Mode: Real-time alerts\n• Delay: {delay}s between requests",
