@@ -13,6 +13,7 @@ import atexit
 import logging
 import os
 import re
+import socket
 import sys
 import time
 from datetime import datetime
@@ -36,6 +37,11 @@ WORDLIST_FILE = os.environ.get("WORDLIST_FILE", "words.txt")
 LOCK_FILE = os.environ.get("LOCK_FILE", "checker.lock")
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "1.5"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10"))
+
+# Railway sets this per-deployment; falls back to hostname (usually the
+# container ID) so duplicate/overlapping instances show up distinctly in
+# logs and Discord instead of looking like one confused process.
+INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", socket.gethostname())
 
 # Minecraft usernames: 3-16 chars, letters/digits/underscore
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
@@ -63,7 +69,7 @@ HEADERS = {
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format=f"%(asctime)s - %(levelname)s - [{INSTANCE_ID}] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("mc_checker")
@@ -76,14 +82,23 @@ log = logging.getLogger("mc_checker")
 
 def acquire_lock() -> None:
     if os.path.exists(LOCK_FILE):
+        with open(LOCK_FILE, "r") as f:
+            holder = f.read().strip()
         log.error(
-            "Lock file '%s' already exists. Another instance may be running. "
-            "Exiting to avoid duplicate checks/messages.",
-            LOCK_FILE,
+            "Lock file '%s' already exists (held by: %s). Another instance "
+            "may be running in THIS container, or - more likely on Railway - "
+            "a separate container/deployment is already active. Exiting to "
+            "avoid duplicate checks/messages.",
+            LOCK_FILE, holder,
+        )
+        send_discord_text(
+            f"⚠️ Instance `{INSTANCE_ID}` refused to start: lock file already "
+            f"held by `{holder}`. If you only expect one deployment running, "
+            f"check Railway's Deployments tab for a lingering old instance."
         )
         sys.exit(1)
     with open(LOCK_FILE, "w") as f:
-        f.write(str(os.getpid()))
+        f.write(INSTANCE_ID)
     atexit.register(release_lock)
 
 
@@ -276,8 +291,8 @@ def main() -> None:
     }
 
     send_discord_text(
-        f"✅ Minecraft Username Checker Started! Checking {total} usernames "
-        f"with {DELAY_SECONDS}s delay"
+        f"✅ Minecraft Username Checker Started! (`{INSTANCE_ID}`) Checking "
+        f"{total} usernames with {DELAY_SECONDS}s delay"
     )
     log.info("Starting run: %d usernames, %.1fs delay between checks", total, DELAY_SECONDS)
 
