@@ -62,7 +62,7 @@ class MinecraftUsernameChecker:
             
             embed.add_embed_field(
                 name="⚙️ Configuration",
-                value=f"• **File**: `words.txt`\n• **Delay**: 2.0 seconds\n• **Mode**: Full scan",
+                value=f"• **File**: `words.txt`\n• **Delay**: 2.0 seconds\n• **Mode**: Real-time alerts",
                 inline=True
             )
             
@@ -85,41 +85,103 @@ class MinecraftUsernameChecker:
             logger.error(f"Error sending startup notification: {e}")
             return False
     
-    def send_completion_message(self, usernames: List[str]) -> bool:
+    def send_available_username(self, username: str) -> bool:
         """
-        Send completion message to Discord.
+        Send a single available username to Discord immediately.
         """
-        if not usernames:
-            # Send "no results" message
-            try:
-                webhook = DiscordWebhook(url=self.webhook_url)
-                
-                embed = DiscordEmbed(
-                    title="❌ No Available Usernames Found",
-                    description="The check completed but no available usernames were found.",
-                    color="ff0000"  # Red
-                )
-                
-                elapsed_time = time.time() - self.start_time if self.start_time else 0
-                embed.add_embed_field(
-                    name="📊 Statistics",
-                    value=f"• Total Checked: **{self.checked_count}/{self.total_to_check}**\n"
-                          f"• Failed Checks: **{self.failed_count}**\n"
-                          f"• Time Elapsed: **{int(elapsed_time // 60)}m {int(elapsed_time % 60)}s**",
-                    inline=True
-                )
-                
-                embed.set_timestamp(datetime.utcnow().isoformat())
-                webhook.add_embed(embed)
-                webhook.execute()
-                logger.info("Sent 'no results' notification to Discord")
+        try:
+            webhook = DiscordWebhook(url=self.webhook_url)
+            
+            embed = DiscordEmbed(
+                title="🎮 AVAILABLE USERNAME FOUND!",
+                description=f"**`{username}`** is available!",
+                color="00ff00"  # Green
+            )
+            
+            embed.set_timestamp(datetime.utcnow().isoformat())
+            
+            # Add stats
+            elapsed_time = time.time() - self.start_time if self.start_time else 0
+            embed.add_embed_field(
+                name="📊 Current Stats",
+                value=f"• Total Found: **{self.found_count + 1}**\n"
+                      f"• Checked: **{self.checked_count}/{self.total_to_check}**\n"
+                      f"• Time Elapsed: **{int(elapsed_time // 60)}m {int(elapsed_time % 60)}s**\n"
+                      f"• Progress: **{(self.checked_count / self.total_to_check * 100):.1f}%**",
+                inline=True
+            )
+            
+            embed.set_footer(
+                text="Minecraft Username Checker - Real-time Alert",
+                icon_url="https://www.minecraft.net/content/dam/games/minecraft/key-art/Minecraft_KeyArt_Header_800x320.png"
+            )
+            
+            webhook.add_embed(embed)
+            response = webhook.execute()
+            
+            if response.status_code in [200, 204]:
+                logger.info(f"✅ Sent available username to Discord: {username}")
                 return True
-            except Exception as e:
-                logger.error(f"Error sending no results notification: {e}")
+            else:
+                logger.error(f"Failed to send username to Discord: {response.status_code}")
                 return False
-        
-        # Send available usernames
-        return self.send_to_discord(usernames)
+                
+        except Exception as e:
+            logger.error(f"Error sending username to Discord: {e}")
+            return False
+    
+    def send_completion_message(self) -> bool:
+        """
+        Send completion message to Discord with final stats.
+        """
+        try:
+            webhook = DiscordWebhook(url=self.webhook_url)
+            
+            elapsed_time = time.time() - self.start_time if self.start_time else 0
+            
+            if self.found_count > 0:
+                embed = DiscordEmbed(
+                    title="✅ Check Complete!",
+                    description=f"Found **{self.found_count}** available username(s)!",
+                    color="00ff00"
+                )
+            else:
+                embed = DiscordEmbed(
+                    title="❌ Check Complete - No Usernames Found",
+                    description="The check completed but no available usernames were found.",
+                    color="ff0000"
+                )
+            
+            embed.set_timestamp(datetime.utcnow().isoformat())
+            
+            embed.add_embed_field(
+                name="📊 Final Statistics",
+                value=f"• Total Available: **{self.found_count}**\n"
+                      f"• Total Checked: **{self.checked_count}/{self.total_to_check}**\n"
+                      f"• Failed Checks: **{self.failed_count}**\n"
+                      f"• Time Elapsed: **{int(elapsed_time // 60)}m {int(elapsed_time % 60)}s**\n"
+                      f"• Success Rate: **{((self.checked_count - self.failed_count) / self.checked_count * 100) if self.checked_count > 0 else 0:.1f}%**",
+                inline=True
+            )
+            
+            embed.set_footer(
+                text="Minecraft Username Checker - Completed",
+                icon_url="https://www.minecraft.net/content/dam/games/minecraft/key-art/Minecraft_KeyArt_Header_800x320.png"
+            )
+            
+            webhook.add_embed(embed)
+            response = webhook.execute()
+            
+            if response.status_code in [200, 204]:
+                logger.info("✅ Completion notification sent to Discord!")
+                return True
+            else:
+                logger.error(f"Failed to send completion notification: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error sending completion notification: {e}")
+            return False
     
     def check_username(self, username: str) -> Tuple[bool, str]:
         """
@@ -216,67 +278,6 @@ class MinecraftUsernameChecker:
             logger.error(f"Error reading file: {e}")
             return []
     
-    def send_to_discord(self, usernames: List[str]) -> bool:
-        """
-        Send available usernames to Discord.
-        """
-        if not usernames:
-            logger.info("No available usernames to send")
-            return False
-        
-        try:
-            chunks = [usernames[i:i+50] for i in range(0, len(usernames), 50)]
-            
-            for i, chunk in enumerate(chunks):
-                webhook = DiscordWebhook(url=self.webhook_url)
-                
-                embed = DiscordEmbed(
-                    title="🎮 Available Minecraft Usernames!",
-                    description=f"Found **{len(usernames)}** available username(s)",
-                    color="00ff00"
-                )
-                
-                embed.set_timestamp(datetime.utcnow().isoformat())
-                
-                username_list = "\n".join([f"• `{name}`" for name in chunk])
-                if len(username_list) > 1000:
-                    username_list = username_list[:997] + "..."
-                
-                embed.add_embed_field(
-                    name=f"📝 Available Usernames (Part {i+1}/{len(chunks)})",
-                    value=username_list,
-                    inline=False
-                )
-                
-                if i == 0:
-                    elapsed_time = time.time() - self.start_time if self.start_time else 0
-                    embed.add_embed_field(
-                        name="📊 Statistics",
-                        value=f"• Total Available: **{len(usernames)}**\n"
-                              f"• Total Checked: **{self.checked_count}/{self.total_to_check}**\n"
-                              f"• Failed: **{self.failed_count}**\n"
-                              f"• Time: **{int(elapsed_time // 60)}m {int(elapsed_time % 60)}s**",
-                        inline=True
-                    )
-                
-                webhook.add_embed(embed)
-                response = webhook.execute()
-                
-                if response.status_code in [200, 204]:
-                    logger.info(f"Sent part {i+1}/{len(chunks)} to Discord")
-                else:
-                    logger.error(f"Failed to send to Discord: {response.status_code}")
-                    return False
-                    
-                if i < len(chunks) - 1:
-                    time.sleep(1)
-                    
-            return True
-                
-        except Exception as e:
-            logger.error(f"Error sending to Discord: {e}")
-            return False
-    
     def check_all_usernames(self, filename: str, delay: float = 0.5) -> None:
         """
         Check all usernames with adaptive rate limiting.
@@ -312,6 +313,24 @@ class MinecraftUsernameChecker:
         logger.info(f"Initial delay: {delay}s")
         logger.info("="*60)
         
+        # Send initial progress update
+        try:
+            webhook = DiscordWebhook(url=self.webhook_url)
+            embed = DiscordEmbed(
+                title="🔍 Starting Check",
+                description=f"Will check **{self.total_to_check}** usernames",
+                color="00ff00"
+            )
+            embed.add_embed_field(
+                name="📊 Info",
+                value=f"• Mode: Real-time alerts\n• Delay: {delay}s between requests",
+                inline=True
+            )
+            webhook.add_embed(embed)
+            webhook.execute()
+        except:
+            pass
+        
         batch_size = 1000
         for batch_start in range(0, len(usernames), batch_size):
             batch_end = min(batch_start + batch_size, len(usernames))
@@ -335,6 +354,8 @@ class MinecraftUsernameChecker:
                     self.available_usernames.append(username)
                     self.found_count += 1
                     logger.info(f"✅ AVAILABLE: {username}")
+                    # Send to Discord immediately
+                    self.send_available_username(username)
                 elif status not in ["Taken", "Invalid username"]:
                     self.failed_count += 1
                     if self.failed_count % 10 == 0:
@@ -346,9 +367,20 @@ class MinecraftUsernameChecker:
                 jitter = random.uniform(0, 0.1)
                 time.sleep(self.current_delay + jitter)
             
+            # Save progress after each batch
             if self.available_usernames:
                 with open('available_usernames_progress.txt', 'w') as f:
                     f.write('\n'.join(self.available_usernames))
+        
+        # Send completion message
+        self.send_completion_message()
+        
+        # Save final results
+        if self.available_usernames:
+            output_file = f"available_usernames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(output_file, 'w') as f:
+                f.write('\n'.join(self.available_usernames))
+            logger.info(f"Saved {len(self.available_usernames)} usernames to {output_file}")
         
         elapsed_time = time.time() - self.start_time
         logger.info("\n" + "="*60)
@@ -358,21 +390,6 @@ class MinecraftUsernameChecker:
         logger.info(f"❌ Failed: {self.failed_count}")
         logger.info(f"⏱️ Time: {int(elapsed_time // 60)}m {int(elapsed_time % 60)}s")
         logger.info("="*60)
-        
-        # Send completion message to Discord
-        if self.available_usernames:
-            output_file = f"available_usernames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            with open(output_file, 'w') as f:
-                f.write('\n'.join(self.available_usernames))
-            logger.info(f"Saved {len(self.available_usernames)} usernames to {output_file}")
-            
-            if self.webhook_url:
-                logger.info("Sending results to Discord...")
-                self.send_completion_message(self.available_usernames)
-        else:
-            if self.webhook_url:
-                logger.info("No usernames found, sending notification...")
-                self.send_completion_message([])
 
 def main():
     """Main function with webhook URL directly in code."""
@@ -380,7 +397,7 @@ def main():
     # ============================================================
     # YOUR DISCORD WEBHOOK URL - PUT YOUR REGENERATED URL HERE
     # ============================================================
-    WEBHOOK_URL = "https://discord.com/api/webhooks/1524005267589693550/06JPUmgxblCNxaja8rlBVONGDkEAfH-FSvZ6ShAklHizL0nmyMdOi-Zgc8FK5q22sSEO"
+    WEBHOOK_URL = "https://discord.com/api/webhooks/1524009670262657177/UFsSKMLYBKCcex4xyoEz87yC_BgS50OdKOSc658OwlW_VoU9o63ML4oCf7ka2zfHWHoY"
     
     # Configuration
     WORDS_FILE = "words.txt"  # Use your full words.txt file
