@@ -189,7 +189,15 @@ def check_mojang(username: str) -> str:
     return CheckResult.ERROR
 
 
-def check_namemc_locked(username: str) -> bool:
+CLOUDFLARE_MARKERS = (
+    "just a moment",
+    "cf-browser-verification",
+    "checking your browser",
+    "attention required",
+)
+
+
+def check_namemc_locked(username: str) -> str:
     """
     Checks whether an available name is 'locked' on NameMC (i.e. reserved
     during the post name-change cooldown and not actually claimable despite
@@ -201,6 +209,12 @@ def check_namemc_locked(username: str) -> bool:
     string in the page's meta description, which is far more reliable than
     scanning the whole page for the word "locked" (which also false-matches
     inside words like "blocked").
+
+    Returns one of: "locked", "available", "unknown". "unknown" means the
+    check couldn't be trusted (request failed, got blocked, or the page
+    didn't look like a normal NameMC search page) - the caller should NOT
+    treat that the same as "available", since that's exactly the failure
+    mode that let a locked name slip through silently before.
     """
     try:
         resp = requests.get(
@@ -210,19 +224,34 @@ def check_namemc_locked(username: str) -> bool:
         )
     except requests.exceptions.RequestException as exc:
         log.warning("NameMC check failed for %s: %s", username, exc)
-        return False
+        return "unknown"
 
     if resp.status_code != 200:
-        log.warning("NameMC returned status %s for %s", resp.status_code, username)
-        return False
+        log.warning(
+            "NameMC returned status %s for %s (likely rate-limited or blocking this IP)",
+            resp.status_code, username,
+        )
+        return "unknown"
+
+    body_lower = resp.text.lower()
+    if any(marker in body_lower for marker in CLOUDFLARE_MARKERS):
+        log.warning(
+            "NameMC served a bot-check/challenge page for %s - this run's IP "
+            "is likely being blocked by NameMC, not just this one name",
+            username,
+        )
+        return "unknown"
 
     match = NAMEMC_STATUS_RE.search(resp.text)
     if not match:
-        log.warning("Could not find NameMC status field for %s", username)
-        return False
+        log.warning(
+            "Could not find NameMC status field for %s - page structure may "
+            "have changed. First 200 chars: %r",
+            username, resp.text[:200],
+        )
+        return "unknown"
 
-    status = match.group(1).lower()
-    return status == "locked"
+    return match.group(1).lower()
 
 
 # --------------------------------------------------------------------------
@@ -243,6 +272,7 @@ def main() -> None:
         "rate_limited": 0,
         "timeout": 0,
         "error": 0,
+        "namemc_unknown": 0,
     }
 
     send_discord_text(
@@ -257,9 +287,9 @@ def main() -> None:
         result = check_mojang(username)
 
         if result == CheckResult.AVAILABLE:
-            locked = check_namemc_locked(username)
+            namemc_status = check_namemc_locked(username)
 
-            if locked:
+            if namemc_status == "locked":
                 stats["locked"] += 1
                 log.info(
                     "🔒 [%d/%d] %s - AVAILABLE but LOCKED (Found: %d)",
@@ -273,6 +303,16 @@ def main() -> None:
                         f"Locked found so far: {stats['locked']}"
                     ),
                     color=COLOR_ORANGE,
+                )
+            elif namemc_status == "unknown":
+                # Don't silently call this "available" - that's the exact
+                # failure mode that let locked names slip through before.
+                stats["namemc_unknown"] += 1
+                log.info(
+                    "⚠️ [%d/%d] %s - AVAILABLE on Mojang, but NameMC check "
+                    "was inconclusive (see WARNING above) - verify manually "
+                    "before treating as a real find",
+                    idx, total, username,
                 )
             else:
                 stats["available"] += 1
@@ -323,7 +363,7 @@ def main() -> None:
         f"({stats['locked']} locked)!\n"
         f"Taken: {stats['taken']} | Blocked: {stats['blocked']} | "
         f"Rate Limited: {stats['rate_limited']} | Timeout: {stats['timeout']} | "
-        f"Errors: {stats['error']}\n"
+        f"Errors: {stats['error']} | NameMC check inconclusive: {stats['namemc_unknown']}\n"
         f"Total checked: {total} | Elapsed: {elapsed}"
     )
 
