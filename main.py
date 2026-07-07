@@ -51,7 +51,7 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            # Fix: Use datetime.now(timezone.utc) instead of utcnow()
+            # FIXED: Use datetime.now(timezone.utc)
             embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             
             # Add info fields
@@ -99,7 +99,7 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            # Fix: Use datetime.now(timezone.utc) instead of utcnow()
+            # FIXED: Use datetime.now(timezone.utc)
             embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             
             # Add stats
@@ -154,7 +154,7 @@ class MinecraftUsernameChecker:
                     color="ff0000"
                 )
             
-            # Fix: Use datetime.now(timezone.utc) instead of utcnow()
+            # FIXED: Use datetime.now(timezone.utc)
             embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             
             embed.add_embed_field(
@@ -298,6 +298,8 @@ class MinecraftUsernameChecker:
                     description="No usernames found in words.txt file!",
                     color="ff0000"
                 )
+                # FIXED: Use datetime.now(timezone.utc)
+                embed.set_timestamp(datetime.now(timezone.utc).isoformat())
                 webhook.add_embed(embed)
                 webhook.execute()
             except:
@@ -325,6 +327,8 @@ class MinecraftUsernameChecker:
                 description=f"Will check **{self.total_to_check}** usernames",
                 color="00ff00"
             )
+            # FIXED: Use datetime.now(timezone.utc)
+            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             embed.add_embed_field(
                 name="📊 Info",
                 value=f"• Mode: Real-time alerts\n• Delay: {delay}s between requests",
