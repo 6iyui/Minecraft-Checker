@@ -4,7 +4,7 @@ import logging
 import sys
 import os
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from discord_webhook import DiscordWebhook, DiscordEmbed
 from typing import List, Tuple, Optional
 
@@ -51,7 +51,8 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            embed.set_timestamp(datetime.utcnow().isoformat())
+            # Fix: Use datetime.now(timezone.utc) instead of utcnow()
+            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             
             # Add info fields
             embed.add_embed_field(
@@ -98,7 +99,8 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            embed.set_timestamp(datetime.utcnow().isoformat())
+            # Fix: Use datetime.now(timezone.utc) instead of utcnow()
+            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             
             # Add stats
             elapsed_time = time.time() - self.start_time if self.start_time else 0
@@ -152,7 +154,8 @@ class MinecraftUsernameChecker:
                     color="ff0000"
                 )
             
-            embed.set_timestamp(datetime.utcnow().isoformat())
+            # Fix: Use datetime.now(timezone.utc) instead of utcnow()
+            embed.set_timestamp(datetime.now(timezone.utc).isoformat())
             
             embed.add_embed_field(
                 name="📊 Final Statistics",
@@ -282,10 +285,7 @@ class MinecraftUsernameChecker:
         """
         Check all usernames with adaptive rate limiting.
         """
-        # Send startup message to Discord
-        logger.info("Sending startup notification to Discord...")
-        self.send_startup_message()
-        
+        # Read usernames first
         usernames = self.read_usernames_from_file(filename)
         
         if not usernames:
@@ -303,6 +303,10 @@ class MinecraftUsernameChecker:
             except:
                 pass
             return
+        
+        # Send startup message after loading usernames
+        logger.info("Sending startup notification to Discord...")
+        self.send_startup_message()
         
         self.total_to_check = len(usernames)
         self.start_time = time.time()
@@ -328,8 +332,8 @@ class MinecraftUsernameChecker:
             )
             webhook.add_embed(embed)
             webhook.execute()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error sending initial update: {e}")
         
         batch_size = 1000
         for batch_start in range(0, len(usernames), batch_size):
