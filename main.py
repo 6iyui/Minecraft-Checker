@@ -22,6 +22,7 @@ class MinecraftUsernameChecker:
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
         self.api_url = "https://api.mojang.com/users/profiles/minecraft/"
+        self.namemc_url = "https://api.namemc.com/profile/"
         self.available_usernames = []
         self.checked_count = 0
         self.found_count = 0
@@ -34,7 +35,7 @@ class MinecraftUsernameChecker:
             webhook = DiscordWebhook(url=self.webhook_url)
             embed = DiscordEmbed(
                 title="✅ Minecraft Username Checker Started!",
-                description=f"Checking **{self.total_to_check}** usernames with 2s delay",
+                description=f"Checking **{self.total_to_check}** usernames with 1.5s delay\nChecking NameMC for locked status",
                 color="00ff00"
             )
             embed.set_timestamp(datetime.now(timezone.utc))
@@ -45,24 +46,41 @@ class MinecraftUsernameChecker:
         except Exception as e:
             logger.error(f"Failed to send startup message: {e}")
     
-    def send_available_username(self, username: str):
+    def send_available_username(self, username: str, is_locked: bool = False):
         """Send available username to Discord immediately."""
         try:
             webhook = DiscordWebhook(url=self.webhook_url)
-            embed = DiscordEmbed(
-                title="🎮 AVAILABLE USERNAME!",
-                description=f"**`{username}`** is available!",
-                color="00ff00"
-            )
+            
+            if is_locked:
+                embed = DiscordEmbed(
+                    title="🔒 LOCKED USERNAME!",
+                    description=f"**`{username}`** is available but LOCKED on NameMC!",
+                    color="ff9900"  # Orange
+                )
+            else:
+                embed = DiscordEmbed(
+                    title="🎮 AVAILABLE USERNAME!",
+                    description=f"**`{username}`** is available and NOT locked!",
+                    color="00ff00"  # Green
+                )
+            
             embed.set_timestamp(datetime.now(timezone.utc))
             embed.add_embed_field(
                 name="Progress",
                 value=f"Found: **{self.found_count + 1}**\nChecked: **{self.checked_count}/{self.total_to_check}**\nProgress: **{(self.checked_count/self.total_to_check*100):.1f}%**",
                 inline=True
             )
+            
+            if is_locked:
+                embed.add_embed_field(
+                    name="⚠️ Note",
+                    value="This username is locked on NameMC. It may become available in the future.",
+                    inline=False
+                )
+            
             webhook.add_embed(embed)
             webhook.execute()
-            logger.info(f"✅ Sent available username: {username}")
+            logger.info(f"✅ Sent available username: {username} (Locked: {is_locked})")
         except Exception as e:
             logger.error(f"Failed to send username: {e}")
     
@@ -99,17 +117,65 @@ class MinecraftUsernameChecker:
         except Exception as e:
             logger.error(f"Failed to send completion message: {e}")
     
-    def check_username(self, username: str) -> Tuple[bool, str]:
-        """Check if a username is available. Returns (is_available, status_message)."""
+    def check_namemc_locked(self, username: str) -> bool:
+        """
+        Check if a username is locked on NameMC.
+        Returns True if locked, False if not locked or error.
+        """
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(
+                f"{self.namemc_url}{username}",
+                headers=headers,
+                timeout=10
+            )
+            
+            # If status is 200, the profile exists (might be locked or not)
+            if response.status_code == 200:
+                # Check if the profile is locked
+                # NameMC returns specific HTML/JSON for locked profiles
+                try:
+                    data = response.json()
+                    # Check for locked status in the response
+                    if data.get('locked') == True:
+                        return True
+                    # Check for other indicators of locked profiles
+                    if 'locked' in str(response.text).lower():
+                        return True
+                except:
+                    # If we can't parse JSON, check the response text
+                    response_text = response.text.lower()
+                    if 'locked' in response_text or 'this profile is locked' in response_text:
+                        return True
+            
+            # If 404, profile doesn't exist (not locked)
+            elif response.status_code == 404:
+                return False
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking NameMC for {username}: {e}")
+            return False
+    
+    def check_username(self, username: str) -> Tuple[bool, str, bool]:
+        """
+        Check if a username is available.
+        Returns (is_available, status_message, is_locked_on_namemc)
+        """
         try:
             username = username.strip().lower()
             if not username or len(username) < 3 or len(username) > 16:
-                return False, "Invalid"
+                return False, "Invalid", False
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
+            # Check Mojang API first
             response = requests.get(
                 f"{self.api_url}{username}",
                 headers=headers,
@@ -118,24 +184,26 @@ class MinecraftUsernameChecker:
             
             # Available if 204 (No Content) or 404 (Not Found)
             if response.status_code in [204, 404]:
-                return True, "Available"
+                # Check NameMC for locked status
+                is_locked = self.check_namemc_locked(username)
+                return True, "Available", is_locked
             # Taken if 200 (OK)
             elif response.status_code == 200:
-                return False, "Taken"
+                return False, "Taken", False
             elif response.status_code == 429:
-                return False, "Rate Limited"
+                return False, "Rate Limited", False
             elif response.status_code == 403:
-                return False, "Blocked"
+                return False, "Blocked", False
             else:
-                return False, f"Status {response.status_code}"
+                return False, f"Status {response.status_code}", False
                 
         except requests.exceptions.Timeout:
-            return False, "Timeout"
+            return False, "Timeout", False
         except Exception as e:
-            return False, f"Error"
+            return False, f"Error", False
     
     def read_usernames(self, filename: str) -> List[str]:
-        """Read usernames from file."""
+        """Read and sort usernames from file to ensure consistent order."""
         try:
             if not os.path.exists(filename):
                 logger.error(f"File {filename} not found!")
@@ -148,13 +216,26 @@ class MinecraftUsernameChecker:
                     if line.strip() and 3 <= len(line.strip()) <= 16
                 ]
             
-            logger.info(f"Loaded {len(usernames)} usernames from {filename}")
-            return usernames
+            # Sort usernames to ensure consistent order
+            usernames.sort()
+            
+            # Remove duplicates
+            unique_usernames = []
+            seen = set()
+            for username in usernames:
+                if username not in seen:
+                    unique_usernames.append(username)
+                    seen.add(username)
+            
+            logger.info(f"Loaded {len(unique_usernames)} unique usernames from {filename}")
+            logger.info(f"Removed {len(usernames) - len(unique_usernames)} duplicates")
+            return unique_usernames
+            
         except Exception as e:
             logger.error(f"Error reading file: {e}")
             return []
     
-    def check_all_usernames(self, filename: str, delay: float = 2.0):
+    def check_all_usernames(self, filename: str, delay: float = 1.5):
         """Check all usernames with specified delay."""
         # Read usernames
         usernames = self.read_usernames(filename)
@@ -174,20 +255,25 @@ class MinecraftUsernameChecker:
         logger.info(f"Delay: {delay}s between requests")
         logger.info("="*60)
         
-        # Check each username
+        # Check each username in order
         for index, username in enumerate(usernames, 1):
             self.checked_count = index
             
             # Check username
-            is_available, status = self.check_username(username)
+            is_available, status, is_locked = self.check_username(username)
             
             if is_available:
                 self.available_usernames.append(username)
                 self.found_count += 1
-                logger.info(f"✅ {username} - AVAILABLE (Found: {self.found_count})")
-                self.send_available_username(username)
+                
+                if is_locked:
+                    logger.info(f"🔒 [{index}/{self.total_to_check}] {username} - AVAILABLE but LOCKED on NameMC (Found: {self.found_count})")
+                else:
+                    logger.info(f"✅ [{index}/{self.total_to_check}] {username} - AVAILABLE (Found: {self.found_count})")
+                
+                self.send_available_username(username, is_locked)
             else:
-                logger.info(f"❌ {username} - {status}")
+                logger.info(f"❌ [{index}/{self.total_to_check}] {username} - {status}")
             
             # Delay between requests (except for last one)
             if index < self.total_to_check:
@@ -219,7 +305,7 @@ def main():
     WEBHOOK_URL = "https://discord.com/api/webhooks/1524009670262657177/UFsSKMLYBKCcex4xyoEz87yC_BgS50OdKOSc658OwlW_VoU9o63ML4oCf7ka2zfHWHoY"
     
     WORDS_FILE = "words.txt"
-    DELAY = 2.0  # 2 second delay between requests
+    DELAY = 1.5  # 1.5 second delay between requests
     
     logger.info("Starting Minecraft Username Checker...")
     checker = MinecraftUsernameChecker(WEBHOOK_URL)
