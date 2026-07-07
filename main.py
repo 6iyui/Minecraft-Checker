@@ -28,14 +28,47 @@ class MinecraftUsernameChecker:
         self.found_count = 0
         self.total_to_check = 0
         self.start_time = None
+        self.lock_file = "checker.lock"
+        self.checked_usernames = set()  # Track checked usernames to prevent duplicates
         
+    def acquire_lock(self) -> bool:
+        """Try to acquire a lock file to prevent multiple instances."""
+        try:
+            # Check if lock file exists
+            if os.path.exists(self.lock_file):
+                # Check if the lock is stale (older than 5 minutes)
+                lock_age = time.time() - os.path.getmtime(self.lock_file)
+                if lock_age < 300:  # 5 minutes
+                    logger.warning("Another instance is already running. Exiting...")
+                    return False
+                else:
+                    logger.warning("Found stale lock file. Removing...")
+                    os.remove(self.lock_file)
+            
+            # Create lock file
+            with open(self.lock_file, 'w') as f:
+                f.write(str(os.getpid()))
+            return True
+        except Exception as e:
+            logger.error(f"Error acquiring lock: {e}")
+            return False
+    
+    def release_lock(self):
+        """Release the lock file."""
+        try:
+            if os.path.exists(self.lock_file):
+                os.remove(self.lock_file)
+                logger.info("Lock released")
+        except Exception as e:
+            logger.error(f"Error releasing lock: {e}")
+    
     def send_startup_message(self):
         """Send startup message to Discord."""
         try:
             webhook = DiscordWebhook(url=self.webhook_url)
             embed = DiscordEmbed(
                 title="✅ Minecraft Username Checker Started!",
-                description=f"Checking **{self.total_to_check}** usernames with 1.5s delay\nChecking NameMC for locked status",
+                description=f"Checking **{self.total_to_check}** usernames with 1.5s delay",
                 color="00ff00"
             )
             embed.set_timestamp(datetime.now(timezone.utc))
@@ -55,34 +88,174 @@ class MinecraftUsernameChecker:
                 embed = DiscordEmbed(
                     title="🔒 LOCKED USERNAME!",
                     description=f"**`{username}`** is available but LOCKED on NameMC!",
-                    color="ff9900"  # Orange
+                    color="ff9900"
                 )
             else:
                 embed = DiscordEmbed(
                     title="🎮 AVAILABLE USERNAME!",
-                    description=f"**`{username}`** is available and NOT locked!",
-                    color="00ff00"  # Green
+                    description=f"**`{username}`** is available!",
+                    color="00ff00"
                 )
             
             embed.set_timestamp(datetime.now(timezone.utc))
             embed.add_embed_field(
                 name="Progress",
-                value=f"Found: **{self.found_count + 1}**\nChecked: **{self.checked_count}/{self.total_to_check}**\nProgress: **{(self.checked_count/self.total_to_check*100):.1f}%**",
+                value=f"Found: **{self.found_count + 1}**\nChecked: **{self.checked_count}/{self.total_to_check}**",
                 inline=True
             )
-            
-            if is_locked:
-                embed.add_embed_field(
-                    name="⚠️ Note",
-                    value="This username is locked on NameMC. It may become available in the future.",
-                    inline=False
-                )
-            
             webhook.add_embed(embed)
             webhook.execute()
-            logger.info(f"✅ Sent available username: {username} (Locked: {is_locked})")
+            logger.info(f"✅ Sent: {username}")
         except Exception as e:
             logger.error(f"Failed to send username: {e}")
+    
+    def check_namemc_locked(self, username: str) -> bool:
+        """Check if a username is locked on NameMC."""
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(f"{self.namemc_url}{username}", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                if 'locked' in str(response.text).lower():
+                    return True
+            return False
+        except:
+            return False
+    
+    def check_username(self, username: str) -> Tuple[bool, str, bool]:
+        """Check if a username is available."""
+        try:
+            username = username.strip().lower()
+            if not username or len(username) < 3 or len(username) > 16:
+                return False, "Invalid", False
+            
+            # Skip if already checked
+            if username in self.checked_usernames:
+                return False, "Already Checked", False
+            
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(f"{self.api_url}{username}", headers=headers, timeout=10)
+            
+            # Mark as checked
+            self.checked_usernames.add(username)
+            
+            # Available if 204 (No Content) or 404 (Not Found)
+            if response.status_code in [204, 404]:
+                is_locked = self.check_namemc_locked(username)
+                return True, "Available", is_locked
+            elif response.status_code == 200:
+                return False, "Taken", False
+            elif response.status_code == 429:
+                return False, "Rate Limited", False
+            elif response.status_code == 403:
+                return False, "Blocked", False
+            else:
+                return False, f"Status {response.status_code}", False
+                
+        except requests.exceptions.Timeout:
+            return False, "Timeout", False
+        except Exception as e:
+            return False, "Error", False
+    
+    def read_usernames(self, filename: str) -> List[str]:
+        """Read usernames from file."""
+        try:
+            if not os.path.exists(filename):
+                logger.error(f"File {filename} not found!")
+                return []
+            
+            with open(filename, 'r', encoding='utf-8') as file:
+                usernames = [
+                    line.strip().lower() 
+                    for line in file 
+                    if line.strip() and 3 <= len(line.strip()) <= 16
+                ]
+            
+            # Sort and remove duplicates
+            usernames = sorted(set(usernames))
+            
+            logger.info(f"Loaded {len(usernames)} unique usernames from {filename}")
+            return usernames
+            
+        except Exception as e:
+            logger.error(f"Error reading file: {e}")
+            return []
+    
+    def check_all_usernames(self, filename: str, delay: float = 1.5):
+        """Check all usernames."""
+        # Try to acquire lock
+        if not self.acquire_lock():
+            return
+        
+        try:
+            # Read usernames
+            usernames = self.read_usernames(filename)
+            
+            if not usernames:
+                logger.error("No usernames to check!")
+                return
+            
+            self.total_to_check = len(usernames)
+            self.start_time = time.time()
+            
+            # Send startup message
+            self.send_startup_message()
+            
+            logger.info("="*60)
+            logger.info(f"Starting check for {self.total_to_check} usernames")
+            logger.info(f"Delay: {delay}s between requests")
+            logger.info("="*60)
+            
+            # Check each username
+            for index, username in enumerate(usernames, 1):
+                self.checked_count = index
+                
+                # Check username
+                is_available, status, is_locked = self.check_username(username)
+                
+                if is_available:
+                    self.available_usernames.append(username)
+                    self.found_count += 1
+                    
+                    if is_locked:
+                        logger.info(f"🔒 [{index}/{self.total_to_check}] {username} - AVAILABLE but LOCKED (Found: {self.found_count})")
+                    else:
+                        logger.info(f"✅ [{index}/{self.total_to_check}] {username} - AVAILABLE (Found: {self.found_count})")
+                    
+                    self.send_available_username(username, is_locked)
+                else:
+                    # Don't log "Already Checked" messages
+                    if status != "Already Checked":
+                        logger.info(f"❌ [{index}/{self.total_to_check}] {username} - {status}")
+                
+                # Delay between requests
+                if index < self.total_to_check:
+                    time.sleep(delay)
+            
+            # Send completion message
+            self.send_completion_message()
+            
+            # Save results
+            if self.available_usernames:
+                output_file = f"available_usernames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                with open(output_file, 'w') as f:
+                    f.write('\n'.join(self.available_usernames))
+                logger.info(f"Saved {len(self.available_usernames)} usernames to {output_file}")
+            
+            # Final summary
+            elapsed = int(time.time() - self.start_time)
+            hours = elapsed // 3600
+            minutes = (elapsed % 3600) // 60
+            logger.info("\n" + "="*60)
+            logger.info("📊 CHECK COMPLETE!")
+            logger.info(f"✅ Available: {self.found_count}")
+            logger.info(f"📝 Checked: {self.checked_count}")
+            logger.info(f"⏱️ Time: {hours}h {minutes}m")
+            logger.info("="*60)
+            
+        finally:
+            # Always release the lock when done
+            self.release_lock()
     
     def send_completion_message(self):
         """Send completion message to Discord."""
@@ -116,189 +289,6 @@ class MinecraftUsernameChecker:
             logger.info("✅ Completion message sent to Discord")
         except Exception as e:
             logger.error(f"Failed to send completion message: {e}")
-    
-    def check_namemc_locked(self, username: str) -> bool:
-        """
-        Check if a username is locked on NameMC.
-        Returns True if locked, False if not locked or error.
-        """
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            response = requests.get(
-                f"{self.namemc_url}{username}",
-                headers=headers,
-                timeout=10
-            )
-            
-            # If status is 200, the profile exists (might be locked or not)
-            if response.status_code == 200:
-                # Check if the profile is locked
-                # NameMC returns specific HTML/JSON for locked profiles
-                try:
-                    data = response.json()
-                    # Check for locked status in the response
-                    if data.get('locked') == True:
-                        return True
-                    # Check for other indicators of locked profiles
-                    if 'locked' in str(response.text).lower():
-                        return True
-                except:
-                    # If we can't parse JSON, check the response text
-                    response_text = response.text.lower()
-                    if 'locked' in response_text or 'this profile is locked' in response_text:
-                        return True
-            
-            # If 404, profile doesn't exist (not locked)
-            elif response.status_code == 404:
-                return False
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error checking NameMC for {username}: {e}")
-            return False
-    
-    def check_username(self, username: str) -> Tuple[bool, str, bool]:
-        """
-        Check if a username is available.
-        Returns (is_available, status_message, is_locked_on_namemc)
-        """
-        try:
-            username = username.strip().lower()
-            if not username or len(username) < 3 or len(username) > 16:
-                return False, "Invalid", False
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            # Check Mojang API first
-            response = requests.get(
-                f"{self.api_url}{username}",
-                headers=headers,
-                timeout=10
-            )
-            
-            # Available if 204 (No Content) or 404 (Not Found)
-            if response.status_code in [204, 404]:
-                # Check NameMC for locked status
-                is_locked = self.check_namemc_locked(username)
-                return True, "Available", is_locked
-            # Taken if 200 (OK)
-            elif response.status_code == 200:
-                return False, "Taken", False
-            elif response.status_code == 429:
-                return False, "Rate Limited", False
-            elif response.status_code == 403:
-                return False, "Blocked", False
-            else:
-                return False, f"Status {response.status_code}", False
-                
-        except requests.exceptions.Timeout:
-            return False, "Timeout", False
-        except Exception as e:
-            return False, f"Error", False
-    
-    def read_usernames(self, filename: str) -> List[str]:
-        """Read and sort usernames from file to ensure consistent order."""
-        try:
-            if not os.path.exists(filename):
-                logger.error(f"File {filename} not found!")
-                return []
-            
-            with open(filename, 'r', encoding='utf-8') as file:
-                usernames = [
-                    line.strip().lower() 
-                    for line in file 
-                    if line.strip() and 3 <= len(line.strip()) <= 16
-                ]
-            
-            # Sort usernames to ensure consistent order
-            usernames.sort()
-            
-            # Remove duplicates
-            unique_usernames = []
-            seen = set()
-            for username in usernames:
-                if username not in seen:
-                    unique_usernames.append(username)
-                    seen.add(username)
-            
-            logger.info(f"Loaded {len(unique_usernames)} unique usernames from {filename}")
-            logger.info(f"Removed {len(usernames) - len(unique_usernames)} duplicates")
-            return unique_usernames
-            
-        except Exception as e:
-            logger.error(f"Error reading file: {e}")
-            return []
-    
-    def check_all_usernames(self, filename: str, delay: float = 1.5):
-        """Check all usernames with specified delay."""
-        # Read usernames
-        usernames = self.read_usernames(filename)
-        
-        if not usernames:
-            logger.error("No usernames to check!")
-            return
-        
-        self.total_to_check = len(usernames)
-        self.start_time = time.time()
-        
-        # Send startup message
-        self.send_startup_message()
-        
-        logger.info("="*60)
-        logger.info(f"Starting check for {self.total_to_check} usernames")
-        logger.info(f"Delay: {delay}s between requests")
-        logger.info("="*60)
-        
-        # Check each username in order
-        for index, username in enumerate(usernames, 1):
-            self.checked_count = index
-            
-            # Check username
-            is_available, status, is_locked = self.check_username(username)
-            
-            if is_available:
-                self.available_usernames.append(username)
-                self.found_count += 1
-                
-                if is_locked:
-                    logger.info(f"🔒 [{index}/{self.total_to_check}] {username} - AVAILABLE but LOCKED on NameMC (Found: {self.found_count})")
-                else:
-                    logger.info(f"✅ [{index}/{self.total_to_check}] {username} - AVAILABLE (Found: {self.found_count})")
-                
-                self.send_available_username(username, is_locked)
-            else:
-                logger.info(f"❌ [{index}/{self.total_to_check}] {username} - {status}")
-            
-            # Delay between requests (except for last one)
-            if index < self.total_to_check:
-                time.sleep(delay)
-        
-        # Send completion message
-        self.send_completion_message()
-        
-        # Save results to file
-        if self.available_usernames:
-            output_file = f"available_usernames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            with open(output_file, 'w') as f:
-                f.write('\n'.join(self.available_usernames))
-            logger.info(f"Saved {len(self.available_usernames)} usernames to {output_file}")
-        
-        # Final summary
-        elapsed = int(time.time() - self.start_time)
-        hours = elapsed // 3600
-        minutes = (elapsed % 3600) // 60
-        logger.info("\n" + "="*60)
-        logger.info("📊 CHECK COMPLETE!")
-        logger.info(f"✅ Available: {self.found_count}")
-        logger.info(f"📝 Checked: {self.checked_count}")
-        logger.info(f"⏱️ Time: {hours}h {minutes}m")
-        logger.info("="*60)
 
 def main():
     # YOUR WEBHOOK URL - REGENERATE THIS!
