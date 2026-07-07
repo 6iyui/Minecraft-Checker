@@ -1,306 +1,324 @@
-import requests
-import time
-import logging
-import sys
-import os
-from datetime import datetime, timezone
-from discord_webhook import DiscordWebhook, DiscordEmbed
-from typing import List, Tuple
+#!/usr/bin/env python3
+"""
+Minecraft Username Checker
+---------------------------
+Reads usernames from words.txt, checks each one against Mojang's API for
+availability, checks NameMC for "locked" status on available names, and
+reports results to Discord in real time via webhook.
 
-# Configure logging
+Designed to run unattended on Railway.app (or any always-on worker host).
+"""
+
+import atexit
+import logging
+import os
+import re
+import sys
+import time
+from datetime import datetime
+
+import requests
+from discord_webhook import DiscordEmbed, DiscordWebhook
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+# Prefer an environment variable so the real webhook URL never has to live
+# in source control. Falls back to the value you gave me, but you should
+# regenerate that webhook and set DISCORD_WEBHOOK_URL in Railway instead.
+WEBHOOK_URL = os.environ.get(
+    "DISCORD_WEBHOOK_URL",
+    "https://discord.com/api/webhooks/1524009670262657177/UFsSKMLYBKCcex4xyoEz87yC_BgS50OdKOSc658OwlW_VoU9o63ML4oCf7ka2zfHWHoY",
+)
+
+WORDLIST_FILE = os.environ.get("WORDLIST_FILE", "words.txt")
+LOCK_FILE = os.environ.get("LOCK_FILE", "checker.lock")
+DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "1.5"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10"))
+
+# Minecraft usernames: 3-16 chars, letters/digits/underscore
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
+
+MOJANG_API = "https://api.mojang.com/users/profiles/minecraft/{username}"
+NAMEMC_URL = "https://namemc.com/profile/{username}"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
+
+# --------------------------------------------------------------------------
+# Logging - plain text, no ANSI/rich rendering, safe for Railway's log viewer
+# --------------------------------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('checker.log')
-    ]
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger("mc_checker")
 
-class MinecraftUsernameChecker:
-    def __init__(self, webhook_url: str):
-        self.webhook_url = webhook_url
-        self.api_url = "https://api.mojang.com/users/profiles/minecraft/"
-        self.namemc_url = "https://api.namemc.com/profile/"
-        self.available_usernames = []
-        self.checked_count = 0
-        self.found_count = 0
-        self.total_to_check = 0
-        self.start_time = None
-        self.lock_file = "checker.lock"
-        self.checked_usernames = set()  # Track checked usernames to prevent duplicates
-        
-    def acquire_lock(self) -> bool:
-        """Try to acquire a lock file to prevent multiple instances."""
-        try:
-            # Check if lock file exists
-            if os.path.exists(self.lock_file):
-                # Check if the lock is stale (older than 5 minutes)
-                lock_age = time.time() - os.path.getmtime(self.lock_file)
-                if lock_age < 300:  # 5 minutes
-                    logger.warning("Another instance is already running. Exiting...")
-                    return False
-                else:
-                    logger.warning("Found stale lock file. Removing...")
-                    os.remove(self.lock_file)
-            
-            # Create lock file
-            with open(self.lock_file, 'w') as f:
-                f.write(str(os.getpid()))
-            return True
-        except Exception as e:
-            logger.error(f"Error acquiring lock: {e}")
-            return False
-    
-    def release_lock(self):
-        """Release the lock file."""
-        try:
-            if os.path.exists(self.lock_file):
-                os.remove(self.lock_file)
-                logger.info("Lock released")
-        except Exception as e:
-            logger.error(f"Error releasing lock: {e}")
-    
-    def send_startup_message(self):
-        """Send startup message to Discord."""
-        try:
-            webhook = DiscordWebhook(url=self.webhook_url)
-            embed = DiscordEmbed(
-                title="✅ Minecraft Username Checker Started!",
-                description=f"Checking **{self.total_to_check}** usernames with 1.5s delay",
-                color="00ff00"
-            )
-            embed.set_timestamp(datetime.now(timezone.utc))
-            embed.set_footer(text="Minecraft Username Checker")
-            webhook.add_embed(embed)
-            webhook.execute()
-            logger.info("✅ Startup message sent to Discord")
-        except Exception as e:
-            logger.error(f"Failed to send startup message: {e}")
-    
-    def send_available_username(self, username: str, is_locked: bool = False):
-        """Send available username to Discord immediately."""
-        try:
-            webhook = DiscordWebhook(url=self.webhook_url)
-            
-            if is_locked:
-                embed = DiscordEmbed(
+
+# --------------------------------------------------------------------------
+# Single-instance lock (so a Railway restart can't spin up a second worker
+# checking from the top and double-posting to Discord)
+# --------------------------------------------------------------------------
+
+def acquire_lock() -> None:
+    if os.path.exists(LOCK_FILE):
+        log.error(
+            "Lock file '%s' already exists. Another instance may be running. "
+            "Exiting to avoid duplicate checks/messages.",
+            LOCK_FILE,
+        )
+        sys.exit(1)
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(release_lock)
+
+
+def release_lock() -> None:
+    try:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# Wordlist loading
+# --------------------------------------------------------------------------
+
+def load_usernames(path: str) -> list[str]:
+    if not os.path.exists(path):
+        log.error("Wordlist file '%s' not found.", path)
+        sys.exit(1)
+
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        raw = [line.strip() for line in f if line.strip()]
+
+    valid = sorted({u for u in raw if USERNAME_RE.match(u)})
+
+    skipped = len(raw) - len(valid)
+    if skipped > 0:
+        log.warning(
+            "Loaded %d valid usernames (deduplicated, sorted). "
+            "Skipped %d invalid/duplicate entries.",
+            len(valid),
+            skipped,
+        )
+    else:
+        log.info("Loaded %d valid usernames (deduplicated, sorted).", len(valid))
+
+    return valid
+
+
+# --------------------------------------------------------------------------
+# Discord helpers
+# --------------------------------------------------------------------------
+
+def send_discord_text(content: str) -> None:
+    try:
+        webhook = DiscordWebhook(url=WEBHOOK_URL, content=content)
+        webhook.execute()
+    except Exception as exc:  # noqa: BLE001 - never let a Discord hiccup kill the run
+        log.warning("Failed to send Discord message: %s", exc)
+
+
+def send_discord_embed(title: str, description: str, color: str) -> None:
+    try:
+        webhook = DiscordWebhook(url=WEBHOOK_URL)
+        embed = DiscordEmbed(title=title, description=description, color=color)
+        embed.set_timestamp()
+        webhook.add_embed(embed)
+        webhook.execute()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to send Discord embed: %s", exc)
+
+
+COLOR_GREEN = "2ecc71"
+COLOR_ORANGE = "e67e22"
+
+
+# --------------------------------------------------------------------------
+# Checking logic
+# --------------------------------------------------------------------------
+
+class CheckResult:
+    TAKEN = "TAKEN"
+    AVAILABLE = "AVAILABLE"
+    BLOCKED = "BLOCKED"
+    RATE_LIMITED = "RATE_LIMITED"
+    TIMEOUT = "TIMEOUT"
+    ERROR = "ERROR"
+
+
+def check_mojang(username: str) -> str:
+    try:
+        resp = requests.get(
+            MOJANG_API.format(username=username),
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.Timeout:
+        return CheckResult.TIMEOUT
+    except requests.exceptions.RequestException as exc:
+        log.warning("Request error checking %s: %s", username, exc)
+        return CheckResult.ERROR
+
+    if resp.status_code == 200:
+        return CheckResult.TAKEN
+    if resp.status_code in (204, 404):
+        return CheckResult.AVAILABLE
+    if resp.status_code == 403:
+        return CheckResult.BLOCKED
+    if resp.status_code == 429:
+        return CheckResult.RATE_LIMITED
+
+    log.warning("Unexpected status %s for %s", resp.status_code, username)
+    return CheckResult.ERROR
+
+
+def check_namemc_locked(username: str) -> bool:
+    """
+    Best-effort check of whether an available name is 'locked' on NameMC
+    (i.e. reserved/held and not actually claimable despite Mojang saying
+    it's free). NameMC doesn't offer a documented public API for this, so
+    this scrapes the profile page. Treat the result as advisory - if the
+    page layout changes this may need updating.
+    """
+    try:
+        resp = requests.get(
+            NAMEMC_URL.format(username=username),
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.RequestException as exc:
+        log.warning("NameMC check failed for %s: %s", username, exc)
+        return False
+
+    if resp.status_code != 200:
+        return False
+
+    page = resp.text.lower()
+    # NameMC shows explicit copy on the profile page when a name that looks
+    # available is actually locked/held.
+    return "locked" in page and "available" in page
+
+
+# --------------------------------------------------------------------------
+# Main run
+# --------------------------------------------------------------------------
+
+def main() -> None:
+    acquire_lock()
+
+    usernames = load_usernames(WORDLIST_FILE)
+    total = len(usernames)
+
+    stats = {
+        "available": 0,
+        "locked": 0,
+        "taken": 0,
+        "blocked": 0,
+        "rate_limited": 0,
+        "timeout": 0,
+        "error": 0,
+    }
+
+    send_discord_text(
+        f"✅ Minecraft Username Checker Started! Checking {total} usernames "
+        f"with {DELAY_SECONDS}s delay"
+    )
+    log.info("Starting run: %d usernames, %.1fs delay between checks", total, DELAY_SECONDS)
+
+    start_time = datetime.now()
+
+    for idx, username in enumerate(usernames, start=1):
+        result = check_mojang(username)
+
+        if result == CheckResult.AVAILABLE:
+            locked = check_namemc_locked(username)
+
+            if locked:
+                stats["locked"] += 1
+                log.info(
+                    "🔒 [%d/%d] %s - AVAILABLE but LOCKED (Found: %d)",
+                    idx, total, username, stats["locked"],
+                )
+                send_discord_embed(
                     title="🔒 LOCKED USERNAME!",
-                    description=f"**`{username}`** is available but LOCKED on NameMC!",
-                    color="ff9900"
+                    description=(
+                        f"`{username}` is available but **LOCKED** on NameMC!\n\n"
+                        f"Progress: {idx}/{total}\n"
+                        f"Locked found so far: {stats['locked']}"
+                    ),
+                    color=COLOR_ORANGE,
                 )
             else:
-                embed = DiscordEmbed(
+                stats["available"] += 1
+                log.info(
+                    "✅ [%d/%d] %s - AVAILABLE (Found: %d)",
+                    idx, total, username, stats["available"],
+                )
+                send_discord_embed(
                     title="🎮 AVAILABLE USERNAME!",
-                    description=f"**`{username}`** is available!",
-                    color="00ff00"
+                    description=(
+                        f"`{username}` is available!\n\n"
+                        f"Progress: {idx}/{total}\n"
+                        f"Available found so far: {stats['available']}"
+                    ),
+                    color=COLOR_GREEN,
                 )
-            
-            embed.set_timestamp(datetime.now(timezone.utc))
-            embed.add_embed_field(
-                name="Progress",
-                value=f"Found: **{self.found_count + 1}**\nChecked: **{self.checked_count}/{self.total_to_check}**",
-                inline=True
-            )
-            webhook.add_embed(embed)
-            webhook.execute()
-            logger.info(f"✅ Sent: {username}")
-        except Exception as e:
-            logger.error(f"Failed to send username: {e}")
-    
-    def check_namemc_locked(self, username: str) -> bool:
-        """Check if a username is locked on NameMC."""
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            response = requests.get(f"{self.namemc_url}{username}", headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                if 'locked' in str(response.text).lower():
-                    return True
-            return False
-        except:
-            return False
-    
-    def check_username(self, username: str) -> Tuple[bool, str, bool]:
-        """Check if a username is available."""
-        try:
-            username = username.strip().lower()
-            if not username or len(username) < 3 or len(username) > 16:
-                return False, "Invalid", False
-            
-            # Skip if already checked
-            if username in self.checked_usernames:
-                return False, "Already Checked", False
-            
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            response = requests.get(f"{self.api_url}{username}", headers=headers, timeout=10)
-            
-            # Mark as checked
-            self.checked_usernames.add(username)
-            
-            # Available if 204 (No Content) or 404 (Not Found)
-            if response.status_code in [204, 404]:
-                is_locked = self.check_namemc_locked(username)
-                return True, "Available", is_locked
-            elif response.status_code == 200:
-                return False, "Taken", False
-            elif response.status_code == 429:
-                return False, "Rate Limited", False
-            elif response.status_code == 403:
-                return False, "Blocked", False
-            else:
-                return False, f"Status {response.status_code}", False
-                
-        except requests.exceptions.Timeout:
-            return False, "Timeout", False
-        except Exception as e:
-            return False, "Error", False
-    
-    def read_usernames(self, filename: str) -> List[str]:
-        """Read usernames from file."""
-        try:
-            if not os.path.exists(filename):
-                logger.error(f"File {filename} not found!")
-                return []
-            
-            with open(filename, 'r', encoding='utf-8') as file:
-                usernames = [
-                    line.strip().lower() 
-                    for line in file 
-                    if line.strip() and 3 <= len(line.strip()) <= 16
-                ]
-            
-            # Sort and remove duplicates
-            usernames = sorted(set(usernames))
-            
-            logger.info(f"Loaded {len(usernames)} unique usernames from {filename}")
-            return usernames
-            
-        except Exception as e:
-            logger.error(f"Error reading file: {e}")
-            return []
-    
-    def check_all_usernames(self, filename: str, delay: float = 1.5):
-        """Check all usernames."""
-        # Try to acquire lock
-        if not self.acquire_lock():
-            return
-        
-        try:
-            # Read usernames
-            usernames = self.read_usernames(filename)
-            
-            if not usernames:
-                logger.error("No usernames to check!")
-                return
-            
-            self.total_to_check = len(usernames)
-            self.start_time = time.time()
-            
-            # Send startup message
-            self.send_startup_message()
-            
-            logger.info("="*60)
-            logger.info(f"Starting check for {self.total_to_check} usernames")
-            logger.info(f"Delay: {delay}s between requests")
-            logger.info("="*60)
-            
-            # Check each username
-            for index, username in enumerate(usernames, 1):
-                self.checked_count = index
-                
-                # Check username
-                is_available, status, is_locked = self.check_username(username)
-                
-                if is_available:
-                    self.available_usernames.append(username)
-                    self.found_count += 1
-                    
-                    if is_locked:
-                        logger.info(f"🔒 [{index}/{self.total_to_check}] {username} - AVAILABLE but LOCKED (Found: {self.found_count})")
-                    else:
-                        logger.info(f"✅ [{index}/{self.total_to_check}] {username} - AVAILABLE (Found: {self.found_count})")
-                    
-                    self.send_available_username(username, is_locked)
-                else:
-                    # Don't log "Already Checked" messages
-                    if status != "Already Checked":
-                        logger.info(f"❌ [{index}/{self.total_to_check}] {username} - {status}")
-                
-                # Delay between requests
-                if index < self.total_to_check:
-                    time.sleep(delay)
-            
-            # Send completion message
-            self.send_completion_message()
-            
-            # Save results
-            if self.available_usernames:
-                output_file = f"available_usernames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-                with open(output_file, 'w') as f:
-                    f.write('\n'.join(self.available_usernames))
-                logger.info(f"Saved {len(self.available_usernames)} usernames to {output_file}")
-            
-            # Final summary
-            elapsed = int(time.time() - self.start_time)
-            hours = elapsed // 3600
-            minutes = (elapsed % 3600) // 60
-            logger.info("\n" + "="*60)
-            logger.info("📊 CHECK COMPLETE!")
-            logger.info(f"✅ Available: {self.found_count}")
-            logger.info(f"📝 Checked: {self.checked_count}")
-            logger.info(f"⏱️ Time: {hours}h {minutes}m")
-            logger.info("="*60)
-            
-        finally:
-            # Always release the lock when done
-            self.release_lock()
-    
-    def send_completion_message(self):
-        """Send completion message to Discord."""
-        try:
-            webhook = DiscordWebhook(url=self.webhook_url)
-            elapsed = int(time.time() - self.start_time) if self.start_time else 0
-            hours = elapsed // 3600
-            minutes = (elapsed % 3600) // 60
-            
-            if self.found_count > 0:
-                embed = DiscordEmbed(
-                    title="✅ Check Complete!",
-                    description=f"Found **{self.found_count}** available usernames!",
-                    color="00ff00"
-                )
-            else:
-                embed = DiscordEmbed(
-                    title="❌ Check Complete",
-                    description="No available usernames found.",
-                    color="ff0000"
-                )
-            
-            embed.set_timestamp(datetime.now(timezone.utc))
-            embed.add_embed_field(
-                name="📊 Final Stats",
-                value=f"• Checked: **{self.checked_count}**\n• Found: **{self.found_count}**\n• Time: **{hours}h {minutes}m**",
-                inline=True
-            )
-            webhook.add_embed(embed)
-            webhook.execute()
-            logger.info("✅ Completion message sent to Discord")
-        except Exception as e:
-            logger.error(f"Failed to send completion message: {e}")
 
-def main():
-    # YOUR WEBHOOK URL - REGENERATE THIS!
-    WEBHOOK_URL = "https://discord.com/api/webhooks/1524009670262657177/UFsSKMLYBKCcex4xyoEz87yC_BgS50OdKOSc658OwlW_VoU9o63ML4oCf7ka2zfHWHoY"
-    
-    WORDS_FILE = "words.txt"
-    DELAY = 1.5  # 1.5 second delay between requests
-    
-    logger.info("Starting Minecraft Username Checker...")
-    checker = MinecraftUsernameChecker(WEBHOOK_URL)
-    checker.check_all_usernames(WORDS_FILE, DELAY)
-    logger.info("Check complete!")
+        elif result == CheckResult.TAKEN:
+            stats["taken"] += 1
+            log.info("❌ [%d/%d] %s - Taken", idx, total, username)
+
+        elif result == CheckResult.BLOCKED:
+            stats["blocked"] += 1
+            log.info("❌ [%d/%d] %s - Blocked", idx, total, username)
+
+        elif result == CheckResult.RATE_LIMITED:
+            stats["rate_limited"] += 1
+            log.info("❌ [%d/%d] %s - Rate Limited", idx, total, username)
+            # Back off a bit extra on top of the normal delay when we get 429s
+            time.sleep(DELAY_SECONDS * 3)
+
+        elif result == CheckResult.TIMEOUT:
+            stats["timeout"] += 1
+            log.info("❌ [%d/%d] %s - Timeout", idx, total, username)
+
+        else:
+            stats["error"] += 1
+            log.info("❌ [%d/%d] %s - Error", idx, total, username)
+
+        time.sleep(DELAY_SECONDS)
+
+    elapsed = datetime.now() - start_time
+    log.info("Run complete in %s", elapsed)
+
+    send_discord_text(
+        "✅ Check Complete! "
+        f"Found {stats['available']} available usernames "
+        f"({stats['locked']} locked)!\n"
+        f"Taken: {stats['taken']} | Blocked: {stats['blocked']} | "
+        f"Rate Limited: {stats['rate_limited']} | Timeout: {stats['timeout']} | "
+        f"Errors: {stats['error']}\n"
+        f"Total checked: {total} | Elapsed: {elapsed}"
+    )
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.info("Interrupted by user. Shutting down.")
+    except Exception:
+        log.exception("Fatal error - checker crashed.")
+        send_discord_text("❌ Checker crashed with an unhandled error. Check Railway logs.")
+        raise
