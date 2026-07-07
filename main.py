@@ -41,7 +41,13 @@ REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "10"))
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 
 MOJANG_API = "https://api.mojang.com/users/profiles/minecraft/{username}"
-NAMEMC_URL = "https://namemc.com/profile/{username}"
+# NOTE: /profile/{username} only exists for names that have been claimed at
+# some point - it 404s for a name that's available-but-locked, which used to
+# make the locked check silently return False. /search?q= is the endpoint
+# NameMC itself uses to report current status (Available / Locked /
+# Unavailable) for any name, claimed or not.
+NAMEMC_URL = "https://namemc.com/search?q={username}"
+NAMEMC_STATUS_RE = re.compile(r'Status:\s*([A-Za-z]+)', re.IGNORECASE)
 
 HEADERS = {
     "User-Agent": (
@@ -185,11 +191,16 @@ def check_mojang(username: str) -> str:
 
 def check_namemc_locked(username: str) -> bool:
     """
-    Best-effort check of whether an available name is 'locked' on NameMC
-    (i.e. reserved/held and not actually claimable despite Mojang saying
-    it's free). NameMC doesn't offer a documented public API for this, so
-    this scrapes the profile page. Treat the result as advisory - if the
-    page layout changes this may need updating.
+    Checks whether an available name is 'locked' on NameMC (i.e. reserved
+    during the post name-change cooldown and not actually claimable despite
+    Mojang saying it's free).
+
+    Uses NameMC's /search?q= endpoint, which is the one that actually
+    reports live status for a name whether or not it's ever been claimed.
+    NameMC embeds this as a plain "Status: Available|Locked|Unavailable"
+    string in the page's meta description, which is far more reliable than
+    scanning the whole page for the word "locked" (which also false-matches
+    inside words like "blocked").
     """
     try:
         resp = requests.get(
@@ -202,12 +213,16 @@ def check_namemc_locked(username: str) -> bool:
         return False
 
     if resp.status_code != 200:
+        log.warning("NameMC returned status %s for %s", resp.status_code, username)
         return False
 
-    page = resp.text.lower()
-    # NameMC shows explicit copy on the profile page when a name that looks
-    # available is actually locked/held.
-    return "locked" in page and "available" in page
+    match = NAMEMC_STATUS_RE.search(resp.text)
+    if not match:
+        log.warning("Could not find NameMC status field for %s", username)
+        return False
+
+    status = match.group(1).lower()
+    return status == "locked"
 
 
 # --------------------------------------------------------------------------
