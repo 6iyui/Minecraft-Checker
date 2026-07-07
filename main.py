@@ -51,7 +51,7 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            # FIXED: Pass datetime object directly, not string
+            # FIXED: Pass datetime object directly
             embed.set_timestamp(datetime.now(timezone.utc))
             
             # Add info fields
@@ -99,7 +99,7 @@ class MinecraftUsernameChecker:
                 color="00ff00"  # Green
             )
             
-            # FIXED: Pass datetime object directly, not string
+            # FIXED: Pass datetime object directly
             embed.set_timestamp(datetime.now(timezone.utc))
             
             # Add stats
@@ -154,7 +154,7 @@ class MinecraftUsernameChecker:
                     color="ff0000"
                 )
             
-            # FIXED: Pass datetime object directly, not string
+            # FIXED: Pass datetime object directly
             embed.set_timestamp(datetime.now(timezone.utc))
             
             embed.add_embed_field(
@@ -406,8 +406,8 @@ def main():
     WEBHOOK_URL = "https://discord.com/api/webhooks/1524009670262657177/UFsSKMLYBKCcex4xyoEz87yC_BgS50OdKOSc658OwlW_VoU9o63ML4oCf7ka2zfHWHoY"
     
     # Configuration
-    WORDS_FILE = "words.txt"  # Use your full words.txt file
-    REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2.0'))  # 2 second delay between requests
+    WORDS_FILE = "words.txt"
+    REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2.0'))
     
     # Create checker instance
     checker = MinecraftUsernameChecker(WEBHOOK_URL)
