@@ -84,19 +84,34 @@ def acquire_lock() -> None:
     if os.path.exists(LOCK_FILE):
         with open(LOCK_FILE, "r") as f:
             holder = f.read().strip()
-        log.error(
-            "Lock file '%s' already exists (held by: %s). Another instance "
-            "may be running in THIS container, or - more likely on Railway - "
-            "a separate container/deployment is already active. Exiting to "
-            "avoid duplicate checks/messages.",
-            LOCK_FILE, holder,
-        )
-        send_discord_text(
-            f"⚠️ Instance `{INSTANCE_ID}` refused to start: lock file already "
-            f"held by `{holder}`. If you only expect one deployment running, "
-            f"check Railway's Deployments tab for a lingering old instance."
-        )
-        sys.exit(1)
+
+        if holder == INSTANCE_ID:
+            # This is a stale lock left behind by a previous crash/restart of
+            # THIS SAME deployment (Railway keeps RAILWAY_DEPLOYMENT_ID
+            # stable across restarts of one deployment, and the lock file
+            # survives on a persistent volume). It's safe to take over -
+            # nothing else can be holding this ID.
+            log.warning(
+                "Lock file '%s' found holding this instance's own ID (%s). "
+                "Treating as a stale lock from a prior crash/restart and "
+                "taking it over.",
+                LOCK_FILE, holder,
+            )
+        else:
+            log.error(
+                "Lock file '%s' already exists (held by: %s). Another instance "
+                "may be running in THIS container, or - more likely on Railway - "
+                "a separate container/deployment is already active. Exiting to "
+                "avoid duplicate checks/messages.",
+                LOCK_FILE, holder,
+            )
+            send_discord_text(
+                f"⚠️ Instance `{INSTANCE_ID}` refused to start: lock file already "
+                f"held by `{holder}`. If you only expect one deployment running, "
+                f"check Railway's Deployments tab for a lingering old instance."
+            )
+            sys.exit(1)
+
     with open(LOCK_FILE, "w") as f:
         f.write(INSTANCE_ID)
     atexit.register(release_lock)
