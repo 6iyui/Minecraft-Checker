@@ -320,14 +320,25 @@ def main() -> None:
                     color=COLOR_ORANGE,
                 )
             elif namemc_status == "unknown":
-                # Don't silently call this "available" - that's the exact
-                # failure mode that let locked names slip through before.
+                # NameMC check was inconclusive, but Mojang says available -
+                # send it anyway. Caller/user is responsible for double
+                # checking these manually since NameMC couldn't confirm.
                 stats["namemc_unknown"] += 1
                 log.info(
-                    "⚠️ [%d/%d] %s - AVAILABLE on Mojang, but NameMC check "
-                    "was inconclusive (see WARNING above) - verify manually "
-                    "before treating as a real find",
-                    idx, total, username,
+                    "⚠️ [%d/%d] %s - AVAILABLE on Mojang, NameMC check "
+                    "inconclusive (see WARNING above) - sending anyway "
+                    "(Found: %d)",
+                    idx, total, username, stats["namemc_unknown"],
+                )
+                send_discord_embed(
+                    title="⚠️ AVAILABLE (NameMC unverified)",
+                    description=(
+                        f"`{username}` is available on Mojang, but NameMC "
+                        f"status could not be confirmed (rate-limited/blocked).\n\n"
+                        f"Progress: {idx}/{total}\n"
+                        f"Unverified found so far: {stats['namemc_unknown']}"
+                    ),
+                    color=COLOR_ORANGE,
                 )
             else:
                 stats["available"] += 1
